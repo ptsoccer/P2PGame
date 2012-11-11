@@ -11,7 +11,7 @@ namespace P2PGame
 {
     public partial class P2PClient : Form
     {
-        P2PNetClass p2pNet = new P2PNetClass();
+        P2PNetClass p2pNet;
 
         private P2PClient()
         {

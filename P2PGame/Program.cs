@@ -13,9 +13,18 @@ namespace P2PGame
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new P2PClient(54000));
+            //Application.EnableVisualStyles();
+            //Application.SetCompatibleTextRenderingDefault(false);
+            //Application.Run(new Form1());
+
+            P2PNetClass server = new P2PNetClass(50000, "server");
+            P2PNetClass client = new P2PNetClass(System.Net.IPAddress.Parse("192.168.1.104"), 50000, "client");
+            server.CheckEvents();
+
+            P2PNetClass client2 = new P2PNetClass(System.Net.IPAddress.Parse("192.168.1.104"), 50000, "client2");
+            server.CheckEvents();
+            
+            client2.CheckEvents();
         }
     }
 }

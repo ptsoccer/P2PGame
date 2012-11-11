@@ -36,227 +36,155 @@ namespace P2PGame
         public event PlayerJoinedHandler PlayerKicked;
         public event PeerConnectedHandler PeerConnected;
 
-        const uint PunchThroughConst = 0x4e10d00d;
-
-        public IPEndPoint ServerIP { get; private set; }
-        public Peer CurrentUser { get; private set; }
+        public string CurrentUser { get; private set; }
         public bool IsServerHost { get; private set; }
         public bool IsInGame { get; private set; }
+        public IPEndPoint ServerIP { get; private set; }
+        public Peer ServerPeer { get; private set; }
 
         Queue<P2PMessage> queuedGeneralMessages;
         Queue<P2PMessage> queuedGameMessages;
 
         List<Peer> peers;
+        List<Peer> pendingPeers;
         TcpClient client;
+        TcpListener listener;
 
-        public P2PNetClass()
+        public P2PNetClass(int port, string username)
         {
             queuedGeneralMessages = new Queue<P2PMessage>();
             queuedGameMessages = new Queue<P2PMessage>();
 
             peers = new List<Peer>();
             client = new TcpClient();
+            listener = CreateListener(port);
 
             IsInGame = false;
+            IsServerHost = true;
+            CurrentUser = username;
         }
 
-        public IPEndPoint GetLocalIP()
+        public P2PNetClass(IPAddress ip, int port, string username)
         {
-            IPAddress ip = Dns.GetHostEntry((Dns.GetHostName())).AddressList[0];
-            int port = ((IPEndPoint)client.Client.LocalEndPoint).Port;
-            return new IPEndPoint(ip, port);
+            queuedGeneralMessages = new Queue<P2PMessage>();
+            queuedGameMessages = new Queue<P2PMessage>();
+            peers = new List<Peer>();
+            client = new TcpClient();
+
+            listener = CreateListener(0);
+
+            IsInGame = false;
+            IsServerHost = true;
+            CurrentUser = username;
+
+            ConnectToServer(ip, port);
         }
 
-        public bool Connect(IPAddress ip, int port, string username)
+        public void CheckEvents()
         {
-            client.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-            CurrentUser = new Peer(new IPEndPoint(IPAddress.Any, 0), GetLocalIP());
-            CurrentUser.name = username;
+            if (listener.Pending())
+            {
+                TcpClient peerClient = listener.AcceptTcpClient();
+                Peer peer = new Peer(peerClient);
+                peer.isLoggedIn = false;
+                peer.isConnected = true;
+                pendingPeers.Add(peer);
+            }
 
+            PollMessages();
+        }
+
+        public void ConnectToServer(IPAddress ip, int port)
+        {
             ServerIP = new IPEndPoint(ip, port);
-            Peer peer = new Peer(ServerIP, new IPEndPoint(IPAddress.Any, 0));
+            Peer peer = new Peer(ServerIP, true);
+            ServerPeer = peer;
             AddPeer(peer);
-            peers[0].isConnected = true;
+            peer.isConnected = true;
 
-            List<byte> loginData = new List<byte>();
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
+            {
+                using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
+                {
+                    writer.Write(((IPEndPoint)listener.LocalEndpoint).Port);
+                    writer.Write(CurrentUser);
 
-            return true;
+                    byte[] bytes = memStream.ToArray();
+                    ServerPeer.SendData(P2PNotices.ClientJoinRequest, bytes);
+                }
+            }
         }
 
-        public bool StartServer(int port, string username)
+        public void ConnectToPeer(IPAddress ip, int port)
         {
-            try
-            {
-                ServerIP = new IPEndPoint(IPAddress.Any, 0);
-                client = new TcpClient(new IPEndPoint(IPAddress.Any, port));
-                IsServerHost = true;
+            Peer peer = new Peer(new IPEndPoint(ip, port), true);
+            AddPeer(peer);
+            peer.isConnected = true;
 
-                CurrentUser = new Peer(ServerIP, GetLocalIP());
-                CurrentUser.name = username;
-            }
-            catch (Exception)
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
             {
-                return false;
-            }
+                using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
+                {
+                    writer.Write(CurrentUser);
 
-            return true;
+                    byte[] bytes = memStream.ToArray();
+                    ServerPeer.SendData(P2PNotices.PeerConnect, bytes);
+                }
+            }
         }
 
-        
-
-        
-
-        private void CheckPeerConnectionStatus()
+        public TcpListener CreateListener(int port)
         {
+            TcpListener listener = new TcpListener(IPAddress.Any, port);
+            listener.Start();
+            return listener;
+        }
+
+        public void PollMessages()
+        {
+            foreach (Peer peer in pendingPeers)
+            {
+                P2PMessage message;
+                if (peer.CheckForData(out message))
+                {
+                    switch (message.messageType)
+                    {
+                        case P2PNotices.ClientJoinRequest:
+                            if (IsServerHost)
+                                OnConnectionRequest(peer, message.data);
+                            break;
+                    }
+                }
+            }
+
             foreach (Peer peer in peers)
             {
-                if (!peer.isConnected)
+                P2PMessage message;
+                if (peer.CheckForData(out message))
                 {
-                    SendNatPunchThrough(peer);
-                }
-            }
-        }
-
-        private void QueueMessages()
-        {
-            IPEndPoint ip = new IPEndPoint(IPAddress.Any, 0);
-            CheckPeerConnectionStatus();
-
-            while (client.Available > 0)
-            {
-                byte[] data = ReadBytes(ref ip);
-                if (data == null) return;
-
-                Peer peer = GetPeerFromIP(ip);
-
-                if (peer != null)
-                {
-                    if (!peer.isConnected)
+                    switch (message.messageType)
                     {
-                        if (data.Length == 4 && BitConverter.ToUInt32(data, 0) == PunchThroughConst)
-                        {
-                            peer.isConnected = true;
-
-                            if (PeerConnected != null)
-                                PeerConnected(peer);
-                        }
-                    }
-                    else
-                    {
-                        P2PMessage[] messages = GetMessagesFromBytes(data, ip);
-                        if (messages == null) return;
-
-                        messages = peer.GetRelevantMessagesFromMessages(messages);
-
-                        foreach (P2PMessage message in messages)
-                        {
-                            if (message.messageType == P2PNotices.PeerGameData || message.messageType == P2PNotices.PeerCacheData)
-                            {
-                                queuedGameMessages.Enqueue(message);
-                            }
-                            else
-                            {
-                                queuedGeneralMessages.Enqueue(message);
-                            }
-                        }
+                        case P2PNotices.ServerGameInformation:
+                            if (peer.Equals(ServerPeer))
+                                OnServerInformationReceived(message.data);
+                            break;
+                        //case P2PNotices.ServerPlayerJoined:
+                        //    if (peer.ip.Equals(ServerIP))
+                        //        OnPlayerJoined(message.data);
+                        //    break;
+                        case P2PNotices.ServerPlayerJoined:
+                            if (peer.Equals(ServerPeer))
+                                OnPlayerJoined(message.data);
+                            break;
                     }
                 }
-                else
-                {
-                    if (IsServerHost)
-                        OnConnectionRequest(data, ip);
-                }
             }
         }
-
-        private P2PMessage GetNextGameMessage()
-        {
-            if (client == null)
-                return new P2PMessage();
-
-            QueueMessages();
-
-            if (queuedGameMessages.Count > 0)
-            {
-                return queuedGameMessages.Dequeue();
-            }
-
-            return new P2PMessage();
-        }
-
-        private P2PMessage GetNextGeneralMessage()
-        {
-            lock (p2pLock)
-            {
-                if (client == null) 
-                    return new P2PMessage();
-
-                QueueMessages();
-
-                if (queuedGeneralMessages.Count > 0)
-                {
-                    return queuedGeneralMessages.Dequeue();
-                }
-
-                return new P2PMessage();
-            }
-        }
-
-        public void PollGeneralMessages()
-        {
-            P2PMessage msg = GetNextGeneralMessage();
-
-            while (!msg.Empty())
-            {
-                switch (msg.messageType)
-                {
-                    case P2PNotices.ServerConnectionDenied:
-                        if (msg.sender.Equals(ServerIP))
-                            OnConnectionRejected(msg.data);
-                        break;
-                    case P2PNotices.ServerGameInformation:
-                        if (msg.sender.Equals(ServerIP))
-                            OnServerInformationReceived(msg.data);
-                        break;
-                    case P2PNotices.ServerChat:
-                        if (msg.sender.Equals(ServerIP))
-                            OnChatEvent(msg.data);
-                        break;
-                    case P2PNotices.ServerPlayerJoined:
-                        if (msg.sender.Equals(ServerIP))
-                            OnPlayerJoined(msg.data);
-                        break;
-                    case P2PNotices.ServerPlayerKicked:
-                        if (msg.sender.Equals(ServerIP))
-                            OnPlayerKicked(msg.data);
-                        break;
-
-
-                    case P2PNotices.ClientChat:
-                        if (IsServerHost)
-                            ProcessChatRequest(msg);
-                        break;
-
-                }
-
-                msg = GetNextGeneralMessage();
-            }
-        }
-
-        //private void AddPeer(IPEndPoint ip)
-        //{
-        //    peers.Add(new Peer(ip));
-        //}
 
         private void AddPeer(Peer peer)
         {
             peers.Add(peer);
         }
-
-        //private void RemovePeer(IPEndPoint ip)
-        //{
-        //    peers.Remove(new Peer(ip));
-        //}
 
         private void RemovePeer(Peer peer)
         {
@@ -265,7 +193,7 @@ namespace P2PGame
 
         public Peer GetPeerFromIP(IPEndPoint ip)
         {
-            return peers.Find((Peer current) => { return current.externalIP.Equals(ip); });
+            return peers.Find((Peer current) => { return current.Address.Equals(ip); });
         }
 
         public Peer GetPeerFromName(string name)
@@ -274,250 +202,136 @@ namespace P2PGame
         }
 
         #region P2P Actions
-        private void SendDataToPeer(P2PNotices type, Peer peer, byte[] bytes)
-        {
-            lock (p2pLock)
-            {
-                peer.SendDataToPeer(type, bytes, client);
-            }
-        }
+        //private void SendDataToPeer(P2PNotices type, Peer peer, byte[] bytes)
+        //{
+        //    peer.SendDataToPeer(type, bytes, client);
+        //}
 
-        public void SendData(P2PNotices type, byte[] bytes)
-        {
-            if (client == null) return;
-
-            foreach (Peer peer in peers)
-            {
-                SendDataToPeer(type, peer, bytes);
-            }
-        }
-
-        public void DenyJoinRequest(string reason, Peer peer)
-        {
-            SendDataToPeer(P2PNotices.ServerConnectionDenied, peer, p2pText.GetBytes(reason));
-        }
-
-        public void SendNatPunchThrough(Peer peer)
-        {
-            List<byte> data = new List<byte>();
-            data.AddRange(BitConverter.GetBytes(PunchThroughConst));
-            data.AddRange(CurrentUser.Serialize(p2pText));
-            client.Send(data.ToArray(), data.Count, peer.externalIP);
-        }
+        //public void SendData(P2PNotices type, byte[] bytes)
+        //{
+        //    foreach (Peer peer in peers)
+        //    {
+        //        SendDataToPeer(type, peer, bytes);
+        //    }
+        //}
 
         public void SendServerInformation(Peer destinationPeer)
         {
-            List<byte> bytes = new List<byte>();
-
-            bytes.Add((byte)peers.Count);
-
-            bytes.AddRange(CurrentUser.Serialize(p2pText));
-
-            foreach (Peer current in peers)
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
             {
-                if (!current.Equals(destinationPeer))
+                using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
                 {
-                    bytes.AddRange(current.Serialize(p2pText));
-                }
-            }
+                    writer.Write(CurrentUser);
+                    writer.Write(peers.Count((Peer p) => { return p.isLoggedIn; }));
 
-            SendDataToPeer(P2PNotices.ServerGameInformation, destinationPeer, bytes.ToArray());
-        }
+                    foreach (Peer peer in peers)
+                    {
+                        if (peer.isLoggedIn)
+                        {
+                            writer.Write(peer.Address.Address.ToString());
+                            writer.Write(peer.listenPort);
+                            writer.Write(peer.name);
+                        }
+                    }
 
-        public void KickPlayer(Peer peer)
-        {
-            if (IsServerHost && peer != null)
-            {
-                SendData(P2PNotices.ServerPlayerKicked, p2pText.GetBytes(peer.name));
-                RemovePeer(peer);
-
-                if (PlayerKicked != null)
-                    PlayerKicked(peer);
-            }
-        }
-
-        public void SendText(string text)
-        {
-            if (IsInGame)
-            {
-                SendData(P2PNotices.PeerChat, p2pText.GetBytes(text));
-            }
-            else
-            {
-                if (IsServerHost)
-                {
-                    List<byte> data = new List<byte>();
-
-                    byte[] bytes = p2pText.GetBytes(CurrentUser.name);
-                    data.Add((byte)bytes.Length);
-                    data.AddRange(bytes);
-
-                    bytes = p2pText.GetBytes(text);
-                    data.AddRange(BitConverter.GetBytes(bytes.Length));
-                    data.AddRange(bytes);
-
-                    SendData(P2PNotices.ServerChat, data.ToArray());
-
-                    if (ChatEvent != null)
-                        ChatEvent(CurrentUser.name, text);
-                }
-                else
-                {
-                    SendDataToPeer(P2PNotices.ClientChat, peers[0], p2pText.GetBytes(text));
+                    destinationPeer.SendData(P2PNotices.ServerGameInformation, memStream.ToArray());
                 }
             }
         }
         #endregion
 
         #region events
-        void OnConnectionRequest(byte[] data, IPEndPoint ip)
+        void OnConnectionRequest(Peer connectingPeer, byte[] data)
         {
-            try
+            // Read peer's info
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream(data))
             {
-                int versionLength = (byte)data[0];
-                string version = p2pText.GetString(data, 1, versionLength);
-
-                int emulatorLength = (byte)data[1 + versionLength];
-                string emulator = p2pText.GetString(data, 2 + versionLength, emulatorLength);
-
-                Peer newPeer = Peer.Deserialize(data, p2pText, 2 + versionLength + emulatorLength);
-                newPeer.externalIP = ip;
-                AddPeer(newPeer);
-
-                if (version != P2PVersion)
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(memStream))
                 {
-                    DenyJoinRequest("P2P versions not the same", newPeer);
-                    RemovePeer(newPeer);
-                    return;
+                    int port = reader.ReadInt32();
+                    string username = reader.ReadString();
+
+                    connectingPeer.name = username;
+                    connectingPeer.listenPort = port;
                 }
+            }
 
-                if (ConnectionRequested == null || !ConnectionRequested(newPeer.name, emulator, ip))
+            // Send connecting peers info to everyone else
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
+            {
+                using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
                 {
-                    RemovePeer(newPeer);
-                }
-                else
-                {
-                    SendServerInformation(newPeer);
-
-                    byte[] bytes = newPeer.Serialize(p2pText);
+                    writer.Write(connectingPeer.Address.Address.ToString());
+                    writer.Write(connectingPeer.listenPort);
+                    writer.Write(connectingPeer.name);
 
                     foreach (Peer peer in peers)
                     {
-                        if (!peer.Equals(CurrentUser) && !peer.Equals(newPeer))
+                        if (peer.isLoggedIn)
                         {
-                            SendDataToPeer(P2PNotices.ServerPlayerJoined, peer, bytes);
+                            peer.SendData(P2PNotices.ServerPlayerJoined, memStream.ToArray());
                         }
                     }
-
-                    if (IsServerHost)
-                        newPeer.isConnected = true;
-
-                    if (PlayerJoined != null)
-                        PlayerJoined(newPeer);
                 }
             }
-            catch (DecoderFallbackException)
-            {
-                return;
-            }
-            catch (ArgumentOutOfRangeException)
-            {
-                return;
-            }
+
+            // Send everyone else's info to connecting peer
+            SendServerInformation(connectingPeer);
+
+            if (PlayerJoined != null)
+                PlayerJoined(connectingPeer);
+
+            connectingPeer.isLoggedIn = true;
+            pendingPeers.Remove(connectingPeer);
+            peers.Add(connectingPeer);
         }
 
-        void OnConnectionRejected(byte[] data)
-        {
-            if (ConnectionRequested != null)
-                ConnectionRejected(p2pText.GetString(data));
-        }
 
         void OnServerInformationReceived(byte[] data)
         {
-            int numberOfUsers = data[0];
-
-            Peer peer;
-            int currentIndex = 1;
-            peer = Peer.Deserialize(data, p2pText, 1, out currentIndex);
-
-            peers[0].name = peer.name;
-            peers[0].internalIP = peer.internalIP;
-
-            for (int index = 1; index < numberOfUsers; ++index)
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream(data))
             {
-                peer = Peer.Deserialize(data, p2pText, currentIndex, out currentIndex);
-                AddPeer(peer);
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(memStream))
+                {
+                    ServerPeer.name = reader.ReadString();
+
+                    int peerCount = reader.ReadInt32();
+                    for (int i = 0; i < peerCount; ++i)
+                    {
+                        string address = reader.ReadString();
+                        int port = reader.ReadInt32();
+                        string username = reader.ReadString();
+
+                        Peer peer = new Peer(new IPEndPoint(IPAddress.Parse(address), port), true);
+                        peer.name = username;
+                        peer.isLoggedIn = true;
+                        peer.isConnected = true;
+                        peers.Add(peer);
+                    }
+                }
             }
 
             if (JoinedGame != null)
                 JoinedGame(peers);
-
-            for (int index = 1; index < peers.Count; ++index)
-            {
-                SendNatPunchThrough(peers[index]);
-            }
-        }
-
-        void ProcessChatRequest(P2PMessage message)
-        {
-            Peer peer = GetPeerFromIP(message.sender);
-
-            byte[] username = p2pText.GetBytes(peer.name);
-
-            List<byte> bytes = new List<byte>();
-            bytes.Add((byte)username.Length);
-            bytes.AddRange(username);
-            bytes.AddRange(BitConverter.GetBytes(message.data.Length));
-            bytes.AddRange(message.data);
-
-            SendData(P2PNotices.ServerChat, bytes.ToArray());
-
-            if (ChatEvent != null)
-                ChatEvent(peer.name, p2pText.GetString(message.data));
-        }
-
-        void OnChatEvent(byte[] data)
-        {
-            int userLength = data[0];
-            string username = p2pText.GetString(data, 1, userLength);
-
-            int messageLength = BitConverter.ToInt32(data, 1 + userLength);
-            string message = p2pText.GetString(data, 5 + userLength, messageLength);
-
-            ChatEvent(username, message);
         }
 
         void OnPlayerJoined(byte[] data)
         {
-            Peer peer = Peer.Deserialize(data, p2pText);
-            AddPeer(peer);
-
-            if (PlayerJoined != null)
-                PlayerJoined(peer);
-
-            if (!IsServerHost)
-                SendNatPunchThrough(peer);
-        }
-
-        private void OnPlayerKicked(byte[] data)
-        {
-            string username = p2pText.GetString(data);
-
-            Peer peer;
-            if (username != CurrentUser.name)
+            using (System.IO.MemoryStream stream = new System.IO.MemoryStream(data))
             {
-                peer = GetPeerFromName(username);
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(stream))
+                {
+                    string address = reader.ReadString();
+                    int port = reader.ReadInt32();
+                    string username = reader.ReadString();
 
-                peers.Remove(peer);
-            }
-            else
-            {
-                peers.Clear();
-                peer = CurrentUser;
-            }
+                    Peer peer = new Peer(new IPEndPoint(IPAddress.Parse(address), port), false);
+                    pendingPeers.Add(peer);
 
-            if (PlayerKicked != null)
-                PlayerKicked(peer);
+                    if (PlayerJoined != null)
+                        PlayerJoined(peer);
+                }
+            }
         }
         #endregion
     }
