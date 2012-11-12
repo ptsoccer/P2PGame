@@ -48,6 +48,12 @@ namespace P2PGame
             get { return (IPEndPoint) peerClient.Client.RemoteEndPoint; }
         }
 
+        public void Disconnect()
+        {
+            if (peerClient != null)
+                peerClient.Close();
+        }
+
         public bool Equals(Peer compare)
         {
             if (compare.Address.Equals(Address))

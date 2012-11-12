@@ -9,32 +9,26 @@ namespace P2PGame
 {
     public enum P2PNotices
     {
-        ClientJoinRequest, ClientChat,
-        ServerGameInformation, ServerConnectionDenied, ServerChat, ServerPlayerJoined, ServerPlayerKicked,
-        PeerConnect, PeerChat, PeerGameData
+        ClientJoinRequest,
+        ServerGameInformation, ServerPlayerJoined, ServerStartGame,
+        PeerConnect, PeerGameData
     }
 
     #region delegates
 
-    public delegate void ConnectionRejectedHandler(string reason);
-    public delegate bool ConnectionRequestHandler(string username, string emulator, IPEndPoint ip);
-    public delegate void PlayerJoinedHandler(Peer peer);
-    public delegate void JoinedGameHandler(List<Peer> otherPeers);
-    public delegate void ChatEventHandler(string username, string message);
-    public delegate void PlayerKickedHandler(Peer peer);
-    public delegate void PeerConnectedHandler(Peer peer);
+    public delegate void PlayerJoinedHandler(P2PNetClass netClass, string username);
+    public delegate void JoinedGameHandler(P2PNetClass netClass, List<Peer> otherPeers);
+    public delegate void PeerConnectedHandler(P2PNetClass netClass, Peer peer);
+    public delegate void GameStartedHandler(P2PNetClass netClass, int seed);
 
     #endregion
 
     public class P2PNetClass
     {
-        public event ConnectionRequestHandler ConnectionRequested;
-        public event ConnectionRejectedHandler ConnectionRejected;
         public event PlayerJoinedHandler PlayerJoined;
         public event JoinedGameHandler JoinedGame;
-        public event ChatEventHandler ChatEvent;
-        public event PlayerJoinedHandler PlayerKicked;
         public event PeerConnectedHandler PeerConnected;
+        public event GameStartedHandler GameStarted;
 
         public string CurrentUser { get; private set; }
         public bool IsServerHost { get; private set; }
@@ -47,6 +41,10 @@ namespace P2PGame
 
         List<Peer> peers;
         List<Peer> pendingPeers;
+        List<Peer> pendingPeersToRemove;
+        List<Peer> peersToAdd;
+
+        List<string> expectedPeers;
         TcpClient client;
         TcpListener listener;
 
@@ -56,6 +54,11 @@ namespace P2PGame
             queuedGameMessages = new Queue<P2PMessage>();
 
             peers = new List<Peer>();
+            pendingPeers = new List<Peer>();
+            pendingPeersToRemove = new List<Peer>();
+            peersToAdd = new List<Peer>();
+            expectedPeers = new List<string>();
+
             client = new TcpClient();
             listener = CreateListener(port);
 
@@ -68,13 +71,19 @@ namespace P2PGame
         {
             queuedGeneralMessages = new Queue<P2PMessage>();
             queuedGameMessages = new Queue<P2PMessage>();
+
             peers = new List<Peer>();
+            pendingPeers = new List<Peer>();
+            pendingPeersToRemove = new List<Peer>();
+            peersToAdd = new List<Peer>();
+            expectedPeers = new List<string>();
+
             client = new TcpClient();
 
             listener = CreateListener(0);
 
             IsInGame = false;
-            IsServerHost = true;
+            IsServerHost = false;
             CurrentUser = username;
 
             ConnectToServer(ip, port);
@@ -82,7 +91,7 @@ namespace P2PGame
 
         public void CheckEvents()
         {
-            if (listener.Pending())
+            while (listener.Pending())
             {
                 TcpClient peerClient = listener.AcceptTcpClient();
                 Peer peer = new Peer(peerClient);
@@ -145,7 +154,7 @@ namespace P2PGame
             foreach (Peer peer in pendingPeers)
             {
                 P2PMessage message;
-                if (peer.CheckForData(out message))
+                while (peer.CheckForData(out message))
                 {
                     switch (message.messageType)
                     {
@@ -153,32 +162,39 @@ namespace P2PGame
                             if (IsServerHost)
                                 OnConnectionRequest(peer, message.data);
                             break;
+                        case P2PNotices.PeerConnect:
+                            if (!IsServerHost)
+                                OnPeerConnected(peer, message.data);
+                            break;
                     }
                 }
             }
 
-            foreach (Peer peer in peers)
+            if (!IsServerHost && !IsInGame)
             {
                 P2PMessage message;
-                if (peer.CheckForData(out message))
+                while (ServerPeer.CheckForData(out message))
                 {
                     switch (message.messageType)
                     {
                         case P2PNotices.ServerGameInformation:
-                            if (peer.Equals(ServerPeer))
-                                OnServerInformationReceived(message.data);
+                            OnServerInformationReceived(message.data);
                             break;
-                        //case P2PNotices.ServerPlayerJoined:
-                        //    if (peer.ip.Equals(ServerIP))
-                        //        OnPlayerJoined(message.data);
-                        //    break;
                         case P2PNotices.ServerPlayerJoined:
-                            if (peer.Equals(ServerPeer))
-                                OnPlayerJoined(message.data);
+                            OnPlayerJoined(message.data);
+                            break;
+                        case P2PNotices.ServerStartGame:
+                            OnGameStarted(message.data);
                             break;
                     }
                 }
             }
+
+            pendingPeers.RemoveAll((Peer p) => { return pendingPeersToRemove.Contains(p); });
+            peers.AddRange(peersToAdd);
+
+            pendingPeersToRemove.Clear();
+            peersToAdd.Clear();
         }
 
         private void AddPeer(Peer peer)
@@ -207,13 +223,25 @@ namespace P2PGame
         //    peer.SendDataToPeer(type, bytes, client);
         //}
 
-        //public void SendData(P2PNotices type, byte[] bytes)
-        //{
-        //    foreach (Peer peer in peers)
-        //    {
-        //        SendDataToPeer(type, peer, bytes);
-        //    }
-        //}
+        public void SendData(P2PNotices type, byte[] bytes)
+        {
+            foreach (Peer peer in peers)
+            {
+                peer.SendData(type, bytes);
+            }
+        }
+
+        public void StartGame(int seed)
+        {
+            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
+            {
+                using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
+                {
+                    writer.Write(seed);
+                    SendData(P2PNotices.ServerStartGame, memStream.ToArray());
+                }
+            }
+        }
 
         public void SendServerInformation(Peer destinationPeer)
         {
@@ -222,9 +250,20 @@ namespace P2PGame
                 using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
                 {
                     writer.Write(CurrentUser);
-                    writer.Write(peers.Count((Peer p) => { return p.isLoggedIn; }));
+                    writer.Write(peers.Count((Peer p) => { return p.isLoggedIn; }) +
+                        peersToAdd.Count((Peer p) => { return p.isLoggedIn; }));
 
                     foreach (Peer peer in peers)
+                    {
+                        if (peer.isLoggedIn)
+                        {
+                            writer.Write(peer.Address.Address.ToString());
+                            writer.Write(peer.listenPort);
+                            writer.Write(peer.name);
+                        }
+                    }
+
+                    foreach (Peer peer in peersToAdd)
                     {
                         if (peer.isLoggedIn)
                         {
@@ -272,6 +311,14 @@ namespace P2PGame
                             peer.SendData(P2PNotices.ServerPlayerJoined, memStream.ToArray());
                         }
                     }
+
+                    foreach (Peer peer in peersToAdd)
+                    {
+                        if (peer.isLoggedIn)
+                        {
+                            peer.SendData(P2PNotices.ServerPlayerJoined, memStream.ToArray());
+                        }
+                    }
                 }
             }
 
@@ -279,19 +326,22 @@ namespace P2PGame
             SendServerInformation(connectingPeer);
 
             if (PlayerJoined != null)
-                PlayerJoined(connectingPeer);
+                PlayerJoined(this, connectingPeer.name);
+
+            if (PeerConnected != null)
+                PeerConnected(this, connectingPeer);
 
             connectingPeer.isLoggedIn = true;
-            pendingPeers.Remove(connectingPeer);
-            peers.Add(connectingPeer);
+            pendingPeersToRemove.Add(connectingPeer);
+            peersToAdd.Add(connectingPeer);
         }
 
 
         void OnServerInformationReceived(byte[] data)
         {
-            using (System.IO.MemoryStream memStream = new System.IO.MemoryStream(data))
+            using (System.IO.MemoryStream readStream = new System.IO.MemoryStream(data))
             {
-                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(memStream))
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(readStream))
                 {
                     ServerPeer.name = reader.ReadString();
 
@@ -304,15 +354,25 @@ namespace P2PGame
 
                         Peer peer = new Peer(new IPEndPoint(IPAddress.Parse(address), port), true);
                         peer.name = username;
+
+                        using (System.IO.MemoryStream writeStream = new System.IO.MemoryStream())
+                        {
+                            using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(writeStream))
+                            {
+                                writer.Write(CurrentUser);
+                                peer.SendData(P2PNotices.PeerConnect, writeStream.ToArray());
+                            }
+                        }
+
                         peer.isLoggedIn = true;
                         peer.isConnected = true;
-                        peers.Add(peer);
+                        peersToAdd.Add(peer);
                     }
                 }
             }
 
             if (JoinedGame != null)
-                JoinedGame(peers);
+                JoinedGame(this, peers.Union(peersToAdd).ToList());
         }
 
         void OnPlayerJoined(byte[] data)
@@ -325,11 +385,59 @@ namespace P2PGame
                     int port = reader.ReadInt32();
                     string username = reader.ReadString();
 
-                    Peer peer = new Peer(new IPEndPoint(IPAddress.Parse(address), port), false);
-                    pendingPeers.Add(peer);
+                    Peer peer = pendingPeers.FirstOrDefault((Peer p) => { return p.name == username; });
 
-                    if (PlayerJoined != null)
-                        PlayerJoined(peer);
+                    if (peer == null)
+                    {
+                        expectedPeers.Add(username);
+
+                        if (PlayerJoined != null)
+                            PlayerJoined(this, username);
+                    }
+                    else
+                    {
+                        pendingPeersToRemove.Add(peer);
+                        peersToAdd.Add(peer);
+
+                        if (PeerConnected != null)
+                            PeerConnected(this, peer);
+                    }
+                }
+            }
+        }
+
+        void OnPeerConnected(Peer peer, byte[] data)
+        {
+            using (System.IO.MemoryStream stream = new System.IO.MemoryStream(data))
+            {
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(stream))
+                {
+                    string username = reader.ReadString();
+                    peer.name = username;
+
+                    if (expectedPeers.Contains(username))
+                    {
+                        expectedPeers.Remove(username);
+                        pendingPeersToRemove.Add(peer);
+                        peersToAdd.Add(peer);
+
+                        if (PeerConnected != null)
+                            PeerConnected(this, peer);
+                    }
+                }
+            }
+        }
+
+        private void OnGameStarted(byte[] data)
+        {
+            using (System.IO.MemoryStream stream = new System.IO.MemoryStream(data))
+            {
+                using (System.IO.BinaryReader reader = new System.IO.BinaryReader(stream))
+                {
+                    int seed = reader.ReadInt32();
+
+                    if (GameStarted != null)
+                        GameStarted(this, seed);
                 }
             }
         }
