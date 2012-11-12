@@ -241,6 +241,14 @@ namespace P2PGame
                     SendData(P2PNotices.ServerStartGame, memStream.ToArray());
                 }
             }
+
+            if (GameStarted != null)
+                GameStarted(this, seed);
+        }
+
+        public void SendGameData(byte[] data)
+        {
+            SendData(P2PNotices.PeerGameData, data);
         }
 
         public void SendServerInformation(Peer destinationPeer)

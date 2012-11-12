@@ -26,14 +26,16 @@ namespace P2PGame
             server.JoinedGame += new JoinedGameHandler(JoinGame);
             server.PeerConnected += new PeerConnectedHandler(PeerConnected);
             server.PlayerJoined += new PlayerJoinedHandler(PlayerJoined);
+            server.GameStarted += new GameStartedHandler(GameStarted);
 
             List<P2PNetClass> clients = new List<P2PNetClass>();
             for (int i = 0; i < 5; ++i)
             {
-                clients.Add(new P2PNetClass(System.Net.IPAddress.Parse("192.168.1.104"), 50000, "client" + (i + 1)));
+                clients.Add(new P2PNetClass(System.Net.IPAddress.Loopback, 50000, "client" + (i + 1)));
                 clients[i].JoinedGame += new JoinedGameHandler(JoinGame);
                 clients[i].PeerConnected += new PeerConnectedHandler(PeerConnected);
                 clients[i].PlayerJoined += new PlayerJoinedHandler(PlayerJoined);
+                clients[i].GameStarted += new GameStartedHandler(GameStarted);
             }
 
             for (int i = 0;; ++i)
@@ -46,8 +48,20 @@ namespace P2PGame
                     client.CheckEvents();
                 }
 
+                if (i == 3)
+                    server.StartGame(1);
+                else if (i > 5)
+                {
+
+                }
+
                 System.Threading.Thread.Sleep(1);
             }
+        }
+
+        static void GameStarted(P2PNetClass netClass, int seed)
+        {
+            Console.WriteLine(string.Format("{0}: Game started with seed {1}", netClass.CurrentUser, seed));
         }
 
         static void PlayerJoined(P2PNetClass netClass, string username)
