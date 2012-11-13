@@ -20,6 +20,7 @@ namespace P2PGame
     public delegate void JoinedGameHandler(P2PNetClass netClass, List<Peer> otherPeers);
     public delegate void PeerConnectedHandler(P2PNetClass netClass, Peer peer);
     public delegate void GameStartedHandler(P2PNetClass netClass, int seed);
+    public delegate void GameDataHandler(P2PNetClass netClass, Peer peer, byte[] data);
 
     #endregion
 
@@ -29,6 +30,7 @@ namespace P2PGame
         public event JoinedGameHandler JoinedGame;
         public event PeerConnectedHandler PeerConnected;
         public event GameStartedHandler GameStarted;
+        public event GameDataHandler GameDataArrived;
 
         public string CurrentUser { get; private set; }
         public bool IsServerHost { get; private set; }
@@ -189,6 +191,22 @@ namespace P2PGame
                     }
                 }
             }
+            else if (IsInGame)
+            {
+                foreach (Peer peer in peers)
+                {
+                    P2PMessage message;
+                    while (peer.CheckForData(out message))
+                    {
+                        switch (message.messageType)
+                        {
+                            case P2PNotices.PeerGameData:
+                                OnGameData(peer, message.data);
+                                break;
+                        }
+                    }
+                }
+            }
 
             pendingPeers.RemoveAll((Peer p) => { return pendingPeersToRemove.Contains(p); });
             peers.AddRange(peersToAdd);
@@ -207,6 +225,17 @@ namespace P2PGame
             peers.Remove(peer);
         }
 
+        public void DisconnectPeer(Peer peer)
+        {
+            peers.Remove(peer);
+            peer.Disconnect();
+        }
+
+        public void DisconnectPeer(string peerName)
+        {
+            DisconnectPeer(peers.Find((Peer p) => { return p.name == peerName; }));
+        }
+
         public Peer GetPeerFromIP(IPEndPoint ip)
         {
             return peers.Find((Peer current) => { return current.Address.Equals(ip); });
@@ -218,11 +247,6 @@ namespace P2PGame
         }
 
         #region P2P Actions
-        //private void SendDataToPeer(P2PNotices type, Peer peer, byte[] bytes)
-        //{
-        //    peer.SendDataToPeer(type, bytes, client);
-        //}
-
         public void SendData(P2PNotices type, byte[] bytes)
         {
             foreach (Peer peer in peers)
@@ -241,6 +265,8 @@ namespace P2PGame
                     SendData(P2PNotices.ServerStartGame, memStream.ToArray());
                 }
             }
+
+            IsInGame = true;
 
             if (GameStarted != null)
                 GameStarted(this, seed);
@@ -448,6 +474,14 @@ namespace P2PGame
                         GameStarted(this, seed);
                 }
             }
+
+            IsInGame = true;
+        }
+
+        private void OnGameData(Peer peer, byte[] data)
+        {
+            if (GameDataArrived != null)
+                GameDataArrived(this, peer, data);
         }
         #endregion
     }
