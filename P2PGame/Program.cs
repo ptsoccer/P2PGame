@@ -5,10 +5,27 @@ using System.Windows.Forms;
 
 namespace P2PGame
 {
+    enum GameEventType
+    {
+        GameState, GameEvent
+    }
+
     struct FrameState
     {
         public int frameNumber;
         public int state;
+    }
+
+    struct GameEvent
+    {
+        public GameEventType mType;
+        public object mEventData;
+
+        public GameEvent(GameEventType type, object eventData)
+        {
+            mType = type;
+            mEventData = eventData;
+        }
     }
 
     class PeerFrameState
@@ -26,6 +43,9 @@ namespace P2PGame
         public Queue<int> localStateQueue;
         public Queue<int> localGameEvents;
 
+        // Events queued to be sent to other peers (will be sent on network tick)
+        public Queue<GameEvent> queuedEvents;
+
         public Dictionary<string, PeerFrameState> peerFrameStates;
         public Dictionary<string, Queue<int>> peerGameEvents;
     }
@@ -36,11 +56,6 @@ namespace P2PGame
         /// The main entry point for the application.
         /// </summary>
         /// 
-
-        enum GameEventTypes
-        {
-            GameState, GameEvent
-        }
 
         static P2PNetClass server;
         static List<P2PNetClass> peers = new List<P2PNetClass>();
@@ -73,12 +88,13 @@ namespace P2PGame
 
             foreach (P2PNetClass peer in peers)
             {
-                peerStates[peer.CurrentUser] = new PeerState();
-                peerStates[peer.CurrentUser].peerFrameStates = new Dictionary<string, PeerFrameState>();
-                peerStates[peer.CurrentUser].peerGameEvents = new Dictionary<string, Queue<int>>();
-                peerStates[peer.CurrentUser].localStateQueue = new Queue<int>();
-                peerStates[peer.CurrentUser].localGameEvents = new Queue<int>();
-                peerStates[peer.CurrentUser].otherPeers = new List<string>();
+                PeerState peerState = peerStates[peer.CurrentUser] = new PeerState();
+                peerState.peerFrameStates = new Dictionary<string, PeerFrameState>();
+                peerState.peerGameEvents = new Dictionary<string, Queue<int>>();
+                peerState.localStateQueue = new Queue<int>();
+                peerState.localGameEvents = new Queue<int>();
+                peerState.queuedEvents = new Queue<GameEvent>();
+                peerState.otherPeers = new List<string>();
                 peer.JoinedGame += new JoinedGameHandler(JoinGame);
                 peer.PeerConnected += new PeerConnectedHandler(PeerConnected);
                 peer.PlayerJoined += new PlayerJoinedHandler(PlayerJoined);
@@ -97,24 +113,23 @@ namespace P2PGame
                     server.StartGame(1);
                 else if (i > 5)
                 {
-                    foreach (P2PNetClass peer in peers)
-                    {
-                        if (ran.Next(0, 100) >= 0)
-                        {
-                            int gameEvent = ran.Next();
-                            peerStates[peer.CurrentUser].localGameEvents.Enqueue(gameEvent);
-                            peerStates[peer.CurrentUser].localStateQueue.Enqueue(peerStates[peer.CurrentUser].currentState);
-                            peer.SendData(P2PNotices.PeerGameData,
-                                CreateGameData(peerStates[peer.CurrentUser].currentState, gameEvent));
-                        }
-                        else
-                        {
-                            Console.WriteLine("Skipping sending state for {0}", peer.CurrentUser);
-                        }
-                    }
-
                     if (i > 6)
                         CheckGameStates();
+
+                    foreach (P2PNetClass peer in peers)
+                    {
+                        PeerState peerState = peerStates[peer.CurrentUser];
+                        if (i > 6)
+                        {
+                            //ModifyGameStates(peers);
+                            int gameEvent = ran.Next();
+                            peerState.queuedEvents.Enqueue(new GameEvent(GameEventType.GameEvent, gameEvent));
+                            peerState.localGameEvents.Enqueue(gameEvent);
+                        }
+
+                        peerState.localStateQueue.Enqueue(peerState.currentState);
+                        peer.SendData(P2PNotices.PeerGameData, CreateGameData(peerState));
+                    }
                 }
 
                 System.Threading.Thread.Sleep(500);
@@ -171,12 +186,17 @@ namespace P2PGame
                     for (int i = 0; i < currentPeerState.otherPeers.Count; ++i)
                     {
                         string otherPeerName = currentPeerState.otherPeers[i];
+                        var otherPeerQueue = currentPeerState.peerGameEvents[otherPeerName];
 
-                        int peerGameEvent = currentPeerState.peerGameEvents[otherPeerName].Dequeue();
-                        currentPeerState.currentState += peerGameEvent;
+                        while (otherPeerQueue.Count > 0)
+                        {
+                            int peerGameEvent = currentPeerState.peerGameEvents[otherPeerName].Dequeue();
+                            currentPeerState.currentState += peerGameEvent;
+                        }
                     }
 
-                    currentPeerState.currentState += currentPeerState.localGameEvents.Dequeue();
+                    while (currentPeerState.localGameEvents.Count > 0)
+                        currentPeerState.currentState += currentPeerState.localGameEvents.Dequeue();
                 }
             }
 
@@ -195,6 +215,11 @@ namespace P2PGame
             Console.WriteLine("{0}: Game started with seed {1}", netClass.CurrentUser, seed);
         }
 
+        private static void ModifyGameStates(List<P2PNetClass> peers)
+        {
+            
+        }
+
         static void ParseGameData(P2PNetClass netClass, Peer peer, byte[] data)
         {
             PeerState currentPeerState = peerStates[netClass.CurrentUser];
@@ -202,20 +227,26 @@ namespace P2PGame
             {
                 using (System.IO.BinaryReader reader = new System.IO.BinaryReader(memStream))
                 {
+                    List<GameEvent> events = new List<GameEvent>();
+
                     try
                     {
                         while (true)
                         {
-                            GameEventTypes eventType = (GameEventTypes)reader.ReadInt32();
+                            GameEventType eventType = (GameEventType)reader.ReadInt32();
 
                             switch (eventType)
                             {
-                                case GameEventTypes.GameState:
+                                case GameEventType.GameState:
+                                    int state = reader.ReadInt32();
                                     currentPeerState.peerFrameStates[peer.name].
-                                        stateQueue.Enqueue(reader.ReadInt32());
+                                        stateQueue.Enqueue(state);
+                                    events.Add(new GameEvent(eventType, state));
                                     break;
-                                case GameEventTypes.GameEvent:
-                                    currentPeerState.peerGameEvents[peer.name].Enqueue(reader.ReadInt32());
+                                case GameEventType.GameEvent:
+                                    int gameEvent = reader.ReadInt32();
+                                    currentPeerState.peerGameEvents[peer.name].Enqueue(gameEvent);
+                                    events.Add(new GameEvent(eventType, gameEvent));
                                     break;
                             }
                         }
@@ -225,16 +256,20 @@ namespace P2PGame
             }
         }
 
-        static byte[] CreateGameData(int currentState, int gameEvent)
+        static byte[] CreateGameData(PeerState peerState)
         {
             using (System.IO.MemoryStream memStream = new System.IO.MemoryStream())
             {
                 using (System.IO.BinaryWriter writer = new System.IO.BinaryWriter(memStream))
                 {
-                    writer.Write((int)GameEventTypes.GameState);
-                    writer.Write(currentState);
-                    writer.Write((int)GameEventTypes.GameEvent);
-                    writer.Write(gameEvent);
+                    writer.Write((int)GameEventType.GameState);
+                    writer.Write(peerState.currentState);
+
+                    if (peerState.queuedEvents.Count > 0)
+                    {
+                        writer.Write((int)GameEventType.GameEvent);
+                        writer.Write((int)peerState.queuedEvents.Dequeue().mEventData);
+                    }
 
                     return memStream.ToArray();
                 }
